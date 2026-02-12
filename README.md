@@ -125,7 +125,12 @@ git clone https://github.com/shibing624/MedicalGPT
 cd MedicalGPT
 pip install -r requirements.txt --upgrade
 ```
-
+特别的，在复现项目时修改了PPO和GRPO的脚本，注意版本适配：
+```markdown
+cd MedicalGPT
+pip install -r ppo_requirements.txt
+pip install -r grpo_requirements.txt
+```
 #### Hardware Requirement (显存/VRAM)
 
 
@@ -140,6 +145,9 @@ pip install -r requirements.txt --upgrade
 | QLoRA | 4           |   6GB |  12GB |  24GB |   48GB |   72GB |  30GB |   96GB |
 | QLoRA | 2           |   4GB |   8GB |  16GB |   24GB |   48GB |  18GB |   48GB |
 
+* 复现过程中使用一张4090（24GB）可以完成7B模型的增量预训练和SFT（均使用LoRA），RLHF阶段使用RTX PRO 6000（96GB）训练7B模型。
+
+
 ## 🚀 Training Pipeline
 
 Training Stage:
@@ -152,6 +160,7 @@ Training Stage:
 | Reward Modeling                | 奖励模型建模       | [reward_modeling.py](https://github.com/shibing624/MedicalGPT/blob/main/reward_modeling.py)             | [run_rm.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_rm.sh)     |
 | Reinforcement Learning         | 强化学习         | [ppo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/ppo_training.py)                   | [run_ppo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_ppo.sh)   |
 | ORPO                           | 概率偏好优化       | [orpo_training.py](https://github.com/shibing624/MedicalGPT/blob/main/orpo_training.py)                  | [run_orpo.sh](https://github.com/shibing624/MedicalGPT/blob/main/run_orpo.sh) |
+
 
 - 提供完整PT+SFT+DPO全阶段串起来训练的pipeline：[run_training_dpo_pipeline.ipynb](https://github.com/shibing624/MedicalGPT/blob/main/run_training_dpo_pipeline.ipynb) ，其对应的colab： [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shibing624/MedicalGPT/blob/main/run_training_dpo_pipeline.ipynb)，运行完大概需要15分钟
 - 提供完整PT+SFT+RLHF全阶段串起来训练的pipeline：[run_training_ppo_pipeline.ipynb](https://github.com/shibing624/MedicalGPT/blob/main/run_training_ppo_pipeline.ipynb) ，其对应的colab： [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shibing624/MedicalGPT/blob/main/run_training_ppo_pipeline.ipynb) ，运行完大概需要20分钟
