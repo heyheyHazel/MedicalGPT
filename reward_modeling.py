@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
-@author:XuMing(xuming624@qq.com)
-@description:
+reward modeling 奖励模型训练脚本
+Added pad_token_id to tokenizer and model config if not exist, which is required for reward modeling training.
 """
 
 import math
@@ -381,6 +380,11 @@ def main():
         tokenizer_name_or_path = model_args.model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
     prompt_template = get_conv_template(script_args.template_name)
+    if tokenizer.pad_token_id is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+    else:
+        model.config.pad_token_id = tokenizer.eos_token_id
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     if tokenizer.eos_token_id is None:
         tokenizer.eos_token = prompt_template.stop_str  # eos token is required
         tokenizer.add_special_tokens({"eos_token": tokenizer.eos_token})

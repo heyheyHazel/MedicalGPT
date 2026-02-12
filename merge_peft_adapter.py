@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """
+将LoRA权重合并到基础模型中，并保存为Hugging Face格式。
+Merge LoRA weights into the base model and save in Hugging Face format.
 @author:XuMing(xuming624@qq.com)
 @description:
 

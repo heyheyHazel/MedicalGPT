@@ -1,35 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-PPO training for language models with trl.
-Single GPU version.
+PPO分布式训练脚本
+ppo_training.py ddp version
 """
 
 import os
-import sys
 from tqdm import tqdm
 from dataclasses import dataclass, field
 from glob import glob
 from typing import Optional
-import torch
 from datasets import load_dataset
 from loguru import logger
+import torch.distributed as dist
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     HfArgumentParser,
     AutoModelForCausalLM,
     DataCollatorWithPadding,
-    BitsAndBytesConfig,
+    BitsAndBytesConfig
 )
+
 from trl import (
     PPOConfig,
     PPOTrainer,
     ModelConfig,
     get_peft_config,
-    AutoModelForCausalLMWithValueHead,
+    AutoModelForCausalLMWithValueHead
 )
-from template import get_conv_template
 from peft import LoraConfig
+from template import get_conv_template
+import torch
+import bitsandbytes as bnb
+from accelerate import Accelerator
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 
 os.environ["TOKENIZERS_PARALLELISM"] = "FALSE"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -49,6 +54,7 @@ class PPOArguments:
     template_name: Optional[str] = field(default="vicuna", metadata={"help": "The template name."})
     max_source_length: Optional[int] = field(default=1024, metadata={"help": "Max length of prompt input text"})
 
+
 @dataclass
 class ScriptArguments:
     """
@@ -66,18 +72,19 @@ class ScriptArguments:
     num_train_epochs: Optional[int] = field(default=None, metadata={"help": "Train epochs (unused)."})
     per_device_train_batch_size: Optional[int] = field(default=None, metadata={"help": "Per-device batch size (unused)."})
     report_to: Optional[str] = field(default=None, metadata={"help": "Logging backend, e.g. wandb (maps to PPOConfig.log_with)."})
-    dataset_num_proc: Optional[int] = field(default=1, metadata={"help": "Number of processes for dataset preprocessing."})
 
 
 def main():
+    accelerator = Accelerator()
+    local_rank = accelerator.process_index
+    is_main_process = accelerator.is_main_process
     parser = HfArgumentParser((PPOArguments, PPOConfig, ModelConfig, ScriptArguments))
     args, training_args, model_args, script_args = parser.parse_args_into_dataclasses()
 
-    # 分布式训练初始化
+    # 分布式训练设置：获取当前进程的 local_rank，并基于此构建 device_map 实现显存隔离
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device_map = {"": local_rank}  # 强制模型加载到指定 GPU
+    device_map = {"": local_rank}
     is_main_process = local_rank == 0
-
     # 定义 QLoRA 压缩配置
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,  # 开启 4-bit 量化
@@ -85,14 +92,13 @@ def main():
         bnb_4bit_quant_type="nf4",  # 工业界标准数据类型
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
-
     # Only log on main process
     if is_main_process:
         logger.info(f"Parse args: {args}")
         logger.info(f"Training args: {training_args}")
         logger.info(f"Model args: {model_args}")
         logger.info(f"Script args: {script_args}")
-    
+
     if script_args.sft_model_path is None or script_args.reward_model_path is None:
         raise ValueError("Both --sft_model_path and --reward_model_path are required.")
 
@@ -102,15 +108,12 @@ def main():
     if script_args.report_to and training_args.log_with is None:
         training_args.log_with = script_args.report_to
 
-
-    # 加载tokenizer
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         script_args.sft_model_path, 
         trust_remote_code=model_args.trust_remote_code,
         padding_side="left" # 注意：PPO 训练通常需要左侧填充
     )
-
-    # 特殊token设置
     if tokenizer.eos_token_id is None:
         tokenizer.eos_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.sep_token
         tokenizer.add_special_tokens({"eos_token": tokenizer.eos_token})
@@ -126,43 +129,31 @@ def main():
             tokenizer.pad_token = tokenizer.eos_token
         logger.info(f"Add pad_token: {tokenizer.pad_token}, pad_token_id: {tokenizer.pad_token_id}")
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    
+
     logger.debug(f"Tokenizer: {tokenizer}")
 
     # 加载模型
-    # 价值模型 value model
-    value_model = AutoModelForSequenceClassification.from_pretrained(
-        script_args.reward_model_path, 
-        num_labels=1,
-        torch_dtype=torch.bfloat16,
-        device_map=device_map, # 强制隔离
-        quantization_config=bnb_config,
-        trust_remote_code=model_args.trust_remote_code
-    )
+    # 价值模型用于估计当前策略的价值函数
+    # value_model = AutoModelForSequenceClassification.from_pretrained(
+    #     script_args.reward_model_path, 
+    #     num_labels=1,
+    #     torch_dtype=torch.bfloat16,
+    #     device_map=device_map, # 强制隔离
+    #     quantization_config=bnb_config,
+    #     trust_remote_code=model_args.trust_remote_code
+    # )
 
-    if tokenizer.pad_token_id is not None:
-        value_model.config.pad_token_id = tokenizer.pad_token_id
-    else:
-        value_model.config.pad_token_id = tokenizer.eos_token_id
-
-    # 奖励模型 用于评估生成文本的质量
+    # 奖励模型用于评估生成文本的质量
     reward_model = AutoModelForSequenceClassification.from_pretrained(
         script_args.reward_model_path, 
         num_labels=1,
         torch_dtype=torch.bfloat16,
         quantization_config=bnb_config,
-        device_map=device_map,
+        device_map={"": local_rank},
         trust_remote_code=model_args.trust_remote_code
     )
-    if tokenizer.pad_token_id is not None:
-        reward_model.config.pad_token_id = tokenizer.pad_token_id
-    else:
-        reward_model.config.pad_token_id = tokenizer.eos_token_id
-    
-    # 也可令value model = reward model，节省显存，但可能会有性能影响
-    # value_model = reward_model
-    # logger.info("已启用 Reward-Value 参数共享模式，节省 5.5GB 显存。")
-
+    value_model = reward_model 
+    logger.info("已启用 Reward-Value 参数共享模式，节省 5.5GB 显存。")
     peft_config = LoraConfig(
         r=model_args.lora_rank if hasattr(model_args, 'lora_rank') else 8,
         lora_alpha=model_args.lora_alpha if hasattr(model_args, 'lora_alpha') else 16,
@@ -172,7 +163,7 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    # policy model 即actor
+    # 这里我们直接在加载模型时注入 LoRA 配置，这样就不需要后续再调用 `peft_model = get_peft_model(policy, peft_config)` 了。
     policy = AutoModelForCausalLMWithValueHead.from_pretrained(
         script_args.sft_model_path,
         trust_remote_code=model_args.trust_remote_code,
@@ -181,14 +172,7 @@ def main():
         peft_config=peft_config, # <--- 关键：在这里注入 LoRA
         torch_dtype=torch.bfloat16,
     )
-    # 设置policy 的pad token 
-    if tokenizer.pad_token_id is not None:
-        policy.config.pad_token_id = tokenizer.pad_token_id
-    
-        if hasattr(policy, "pretrained_model"):
-            policy.pretrained_model.config.pad_token_id = tokenizer.pad_token_id    
-        logger.info(f"已强制同步 Policy Pad ID 为: {tokenizer.pad_token_id}")
-    
+
     # 强制开启梯度检查点
     if hasattr(policy, "gradient_checkpointing_enable"):
         policy.gradient_checkpointing_enable()
@@ -208,8 +192,7 @@ def main():
         device_map=device_map
         )
 
-
-    # 加载数据
+    # Get datasets
     prompt_template = get_conv_template(args.template_name)
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
@@ -244,100 +227,144 @@ def main():
 
     # Preprocessing the datasets
     max_source_length = args.max_source_length
-
+    # 修改预处理函数以适配新的数据格式，确保能够正确提取 human 的问题并构造 Prompt
     def preprocess_function(examples):
         new_examples = {"input_ids": []}
-        roles = ["human", "gpt"]
-
-        def get_dialog(examples):
-            system_prompts = examples.get("system_prompt", "")
-            for i, source in enumerate(examples['conversations']):
-                if len(source) < 2:
+    # 获取对话列表
+        for i, source in enumerate(examples['conversations']):
+            try:
+            # 1. 直接提取人类的问题 (通常是第一个 message)
+            # 不管后面有没有 gpt 的回答，我们只管拿人问的那句
+                question_text = ""
+                for msg in source:
+                    if msg["from"] == "human":
+                        question_text = msg["value"]
+                        break # 拿到第一句 human 即可
+            
+                if not question_text:
                     continue
-                data_role = source[0].get("from", "")
-                if data_role not in roles or data_role != roles[0]:
-                    # Skip the first one if it is not from human
-                    source = source[1:]
-                if len(source) < 2:
-                    continue
-                messages = []
-                for j, sentence in enumerate(source):
-                    data_role = sentence.get("from", "")
-                    if data_role not in roles:
-                        logger.warning(f"unknown role: {data_role}, {i}. (ignored)")
-                        break
-                    if data_role == roles[j % 2]:
-                        messages.append(sentence["value"])
-                if len(messages) < 2 or len(messages) % 2 != 0:
-                    continue
-                # Convert the list to pairs of elements
-                history_messages = [[messages[k], messages[k + 1]] for k in range(0, len(messages), 2)]
-                system_prompt = system_prompts[i] if system_prompts else None
-                yield prompt_template.get_dialog(history_messages, system_prompt=system_prompt)
-
-        for dialog in get_dialog(examples):
-            for i in range(len(dialog) // 2):
-                source_txt = dialog[2 * i]
-                tokenized_question = tokenizer(source_txt, padding=False)
-                new_examples["input_ids"].append(tokenized_question["input_ids"])
-
+                
+            # 2. 这里的逻辑要符合你选的模板 (qwen)
+            # 我们直接手动拼接一个简单的 Prompt，确保 100% 能被模型读懂
+                full_prompt = f"<|im_start|>system\n你是一个专业的医疗AI助手。<|im_end|>\n<|im_start|>user\n{question_text}<|im_end|>\n<|im_start|>assistant\n"
+            
+            # 3. 分词
+                tokenized = tokenizer(full_prompt, truncation=True, max_length=args.max_source_length)
+                new_examples["input_ids"].append(tokenized["input_ids"])
+            
+            except Exception as e:
+                continue
+            
         return new_examples
 
-    # 处理数据集
+    # def preprocess_function(examples):
+    #     new_examples = {"input_ids": []}
+    #     roles = ["human", "gpt"]
+
+    #     def get_dialog(examples):
+    #         system_prompts = examples.get("system_prompt", "")
+    #         for i, source in enumerate(examples['conversations']):
+    #             if len(source) < 2:
+    #                 continue
+    #             data_role = source[0].get("from", "")
+    #             if data_role not in roles or data_role != roles[0]:
+    #                 # Skip the first one if it is not from human
+    #                 source = source[1:]
+    #             if len(source) < 2:
+    #                 continue
+    #             messages = []
+    #             for j, sentence in enumerate(source):
+    #                 data_role = sentence.get("from", "")
+    #                 if data_role not in roles:
+    #                     logger.warning(f"unknown role: {data_role}, {i}. (ignored)")
+    #                     break
+    #                 if data_role == roles[j % 2]:
+    #                     messages.append(sentence["value"])
+    #             if len(messages) < 2 or len(messages) % 2 != 0:
+    #                 continue
+    #             # Convert the list to pairs of elements
+    #             history_messages = [[messages[k], messages[k + 1]] for k in range(0, len(messages), 2)]
+    #             system_prompt = system_prompts[i] if system_prompts else None
+    #             yield prompt_template.get_dialog(history_messages, system_prompt=system_prompt)
+
+    #     for dialog in get_dialog(examples):
+    #         for i in range(len(dialog) // 2):
+    #             source_txt = dialog[2 * i]
+    #             tokenized_question = tokenizer(source_txt, padding=False)
+    #             new_examples["input_ids"].append(tokenized_question["input_ids"])
+
+    #     return new_examples
+
+    # Preprocess the dataset
     if is_main_process:
+        # num_proc = getattr(training_args, "dataset_num_proc", 1)
+        num_proc = 1
         logger.debug(f"Example train_dataset[0]: {train_dataset[0]}")
-        tokenized_train_dataset = train_dataset.map(
-            preprocess_function,
-            batched=True,
-            num_proc=script_args.dataset_num_proc,
-            remove_columns=train_dataset.column_names,
-            load_from_cache_file=False,
-            desc="Running tokenizer on dataset" if is_main_process else None,
-        )
-        train_dataset = tokenized_train_dataset.filter(
+        with accelerator.main_process_first():
+            tokenized_train_dataset = train_dataset.map(
+                preprocess_function,
+                batched=True,
+                num_proc=1, # 强制改成1
+                remove_columns=train_dataset.column_names,
+                load_from_cache_file=False,
+                desc="Running tokenizer on dataset" if is_main_process else None,
+            )
+            train_dataset = tokenized_train_dataset.filter(
             lambda x: len(x['input_ids']) > 0
-        )
-        logger.debug(f"Train samples tokenized top3: {train_dataset[:3]}")
+            )
+            logger.debug(f"Train samples tokenized top3: {train_dataset[:3]}")
+            print(f"DEBUG: 过滤后的训练集大小为: {len(train_dataset)}")
+            if len(train_dataset) == 0:
+                raise ValueError("错误：数据全部被过滤了！请检查 preprocess_function 逻辑。")
 
-        # Preprocess the dataset for evaluation
-        logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
-        tokenized_eval_dataset = eval_dataset.map(
-            preprocess_function,
-            batched=True,
-            num_proc=script_args.dataset_num_proc,
-            remove_columns=eval_dataset.column_names,
-            load_from_cache_file=False,
-            desc="Running tokenizer on dataset" if is_main_process else None,
-        )
-        eval_dataset = tokenized_eval_dataset.filter(
-            lambda x: len(x['input_ids']) > 0
-        )
-        logger.debug(f"Eval samples tokenized top3: {eval_dataset[:3]}")
-
-    # 定义trainer, 注意不同trl版本的参数名称
+            # Preprocess the dataset for evaluation
+            logger.debug(f"Example eval_dataset[0]: {eval_dataset[0]}")
+            tokenized_eval_dataset = eval_dataset.map(
+                preprocess_function,
+                batched=True,
+                num_proc=1, 
+                remove_columns=eval_dataset.column_names,
+                load_from_cache_file=False,
+                desc="Running tokenizer on dataset" if is_main_process else None,
+            )
+            eval_dataset = tokenized_eval_dataset.filter(
+                lambda x: len(x['input_ids']) > 0
+            )
+            logger.debug(f"Eval samples tokenized top3: {eval_dataset[:3]}")
+            print(f"DEBUG: 过滤后的验证集大小为: {len(eval_dataset)}")
+            if len(eval_dataset) == 0:
+                raise ValueError("错误：验证数据全部被过滤了！请检查 preprocess_function 逻辑。")
+    
+    
+    # PPOTrainer 传入model + tokenizer + dataset
     trainer = PPOTrainer(
         config=training_args,
         tokenizer=tokenizer,
         model=policy,
         ref_model=ref_policy,
+        # reward_model=reward_model,
+        # value_model=value_model,
         dataset=train_dataset,
-        data_collator=data_collator,
+        data_collator=data_collator, 
+        # eval_dataset=eval_dataset,
+        # peft_config=peft_config
+
     )
+
+    # Training
+    # if script_args.do_train:
+    #     if is_main_process:
+    #         logger.info("*** Train ***")
+    #     trainer.train()
+
+    #     # Only log on main process
+    #     if is_main_process:
+    #         trainer.save_model(script_args.output_dir)
 
     # 手写PPO训练循环逻辑
     if script_args.do_train:
         if is_main_process:
             logger.info("*** 启动 PPO 强化学习迭代 ***")
-            try:
-                # 模拟测试一下这几个变量
-                test_device = f"cuda:{local_rank}"
-                print(f"DEBUG: 正在校验设备绑定... {test_device} OK")
-                # 测试一下 policy 和 reward_model 的 pad_token
-                print(f"DEBUG: Policy Pad ID: {policy.config.pad_token_id}")
-                print(f"DEBUG: Reward Pad ID: {reward_model.config.pad_token_id}")
-            except Exception as e:
-                print(f"!!! 启动前校验失败: {e}")
-                sys.exit(1)
 
         # 1. 设定训练总步目
         max_steps = training_args.steps if training_args.steps is not None else 10000
@@ -377,7 +404,7 @@ def main():
             with torch.no_grad():
                 reward_outputs = reward_model(**inputs)
                 # 提取分数 (通常取 logits 的第一个维度)
-                rewards = [score.float().detach().to(f"cuda:{local_rank}") for score in reward_outputs.logits[:, 0]]
+                rewards = [torch.tensor(score).to(policy.device) for score in reward_outputs.logits[:, 0]]
 
             # --- C. 更新阶段 (Optimization) ---
             # 执行最核心的 PPO 梯度更新
@@ -388,20 +415,15 @@ def main():
             # 只有主进程负责上报指标到 WandB
             if is_main_process:
                 trainer.log_stats(stats, batch, rewards)
-                try:
-                    raw_loss = stats.get('ppo/loss/total', 0)
-                    clean_loss = float(raw_loss.item() if hasattr(raw_loss, 'item') else raw_loss)
-                    avg_reward_val = torch.mean(torch.stack(rewards)).float().item()
-                    logger.info(f"Step {step}: Loss={clean_loss:.4f}, Reward={avg_reward_val:.4f}")
-                except Exception as e:
-                    logger.warning(f"Step {step} 日志打印异常: {e}")
-               
+                if step % script_args.logging_steps == 0:
+                    logger.info(f"Step {step}: Loss={stats['ppo/loss/total']:.4f}, Reward={torch.mean(torch.stack(rewards)):.4f}")
+
         # --- E. 训练结束，保存模型 ---
         if is_main_process:
             logger.info(f"训练完成，正在保存模型至 {script_args.output_dir}")
             # 提醒：PPO 的保存需要特殊处理，通常保存 policy 即可
             trainer.save_model(script_args.output_dir)
-
+    
     trainer.generate_completions()
 
 

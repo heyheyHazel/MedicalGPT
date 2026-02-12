@@ -2,6 +2,7 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Inference script
+测试模型推理能力的脚本。
 """
 import argparse
 import json

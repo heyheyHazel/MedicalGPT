@@ -1,17 +1,17 @@
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 supervised_finetuning.py \
-    --model_name_or_path Qwen/Qwen2.5-0.5B-Instruct \
-    --train_file_dir ./data/finetune \
-    --validation_file_dir ./data/finetune \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
+CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node 1 supervised_finetuning.py \
+    --model_name_or_path ./models/base/medical-qwen-7b-pt \
+    --train_file_dir ./data/finetune/version3 \
+    --validation_file_dir ./data/finetune/version3 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
     --do_train \
     --do_eval \
     --template_name qwen \
     --use_peft True \
-    --max_train_samples 1000 \
+    --max_train_samples 10000 \
     --max_eval_samples 10 \
-    --model_max_length 4096 \
-    --num_train_epochs 1 \
+    --model_max_length 1024 \
+    --num_train_epochs 3 \
     --learning_rate 2e-5 \
     --warmup_ratio 0.05 \
     --weight_decay 0.05 \
@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 supervised_finetuning.py \
     --save_total_limit 13 \
     --gradient_accumulation_steps 8 \
     --preprocessing_num_workers 4 \
-    --output_dir outputs-sft-qwen-v1 \
+    --output_dir ./models/sft/outputs-sft-qwen-7b-km-v3 \
     --overwrite_output_dir \
     --ddp_timeout 30000 \
     --logging_first_step True \
@@ -35,7 +35,8 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 supervised_finetuning.py \
     --torch_dtype bfloat16 \
     --bf16 \
     --device_map auto \
-    --report_to tensorboard \
+    --report_to wandb \
+    --run_name qwen-7b-sft-km-v33 \
     --ddp_find_unused_parameters False \
     --gradient_checkpointing True \
     --cache_dir ./cache --flash_attn True

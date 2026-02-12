@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-@author:XuMing(xuming624@qq.com)
-@description: Train a model from SFT using DPO
+DPO training script
+Modified keys in dataset:
+- system: system prompt, optional, can be empty string
+- history: conversation history, list of [question, answer] pairs, optional, can be empty list
+- question: the current question, required
+- response_chosen: the response that is chosen as better, required
+- response_rejected: the response that is rejected as worse, required
 """
+
 import os
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -71,6 +77,9 @@ class ScriptArguments:
         metadata={"help": "Whether to trust remote code when loading a model from a remote checkpoint."},
     )
     # Dataset arguments
+    prompt_column: str = field(default="prompt", metadata={"help": "The name of the column in the datasets containing the prompts."})
+    chosen_column: str = field(default="chosen", metadata={"help": "The name of the column in the datasets containing the chosen responses."})
+    rejected_column: str = field(default="rejected", metadata={"help": "The name of the column in the datasets containing the rejected responses."})
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -389,28 +398,31 @@ def main():
     )
     if args.load_in_4bit or args.load_in_8bit:
         logger.info(f"Quantizing model, load_in_4bit: {args.load_in_4bit}, load_in_8bit: {args.load_in_8bit}")
+    # 当前进程的编号
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         config=config,
         torch_dtype=torch_dtype,
-        low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
-        device_map=args.device_map,
-        trust_remote_code=args.trust_remote_code,
+        device_map={"": local_rank}, # 强制让当前进程只准看自己的这张卡
+        low_cpu_mem_usage=True,      # 必须设为 True 以降低 CPU 内存消耗
+        trust_remote_code=True,
         quantization_config=BitsAndBytesConfig(
-            load_in_4bit=args.load_in_4bit,
-            load_in_8bit=args.load_in_8bit,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch_dtype,
-        ) if args.qlora else None,
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        ) if args.load_in_4bit else None,
     )
+
     # fixed FP16 ValueError
     for param in filter(lambda p: p.requires_grad, model.parameters()):
         param.data = param.data.to(torch.float32)
 
     # Initialize our Trainer
     if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.config.use_cache = False
     else:
         model.config.use_cache = True
@@ -443,13 +455,20 @@ def main():
     peft_config = None
     if args.use_peft:
         logger.info("Fine-tuning method: LoRA(PEFT)")
+        # 1. 尝试从命令行参数获取
         target_modules = args.target_modules.split(',') if args.target_modules else None
-        if target_modules and 'all' in target_modules:
+        # 2. 如果参数是 'all' 或者没传，尝试自动搜索
+        if not target_modules or 'all' in target_modules:
             target_modules = find_all_linear_names(model, int4=args.load_in_4bit, int8=args.load_in_8bit)
-        logger.info(f"Peft target_modules: {target_modules}")
+        # 3. 【重点：最后防线】如果自动搜索也失败了，针对 Qwen 模型手动强制赋值
+        if not target_modules:
+            logger.warning("Target modules 自动搜索失败，正在应用 Qwen2.5 强制映射...")
+            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        logger.info(f"Final Peft target_modules: {target_modules}")
+
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            target_modules=target_modules,
+            target_modules=target_modules, # 现在这里绝对不会是 None 了
             inference_mode=False,
             r=args.lora_rank,
             lora_alpha=args.lora_alpha,
@@ -463,7 +482,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         peft_config=peft_config if args.use_peft else None,
     )
     print_trainable_parameters(trainer.model)

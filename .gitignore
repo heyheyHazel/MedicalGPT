@@ -129,3 +129,40 @@ dmypy.json
 .pyre/
 
 .idea/
+
+
+# 忽略所有模型权重文件夹
+models/
+Qwen/
+Qwen7B/
+Qwen2.5-0.5B/
+Qwen2.5-3B-Instruct/
+checkpoint-*/
+
+# 忽略所有大型权重文件格式
+*.bin
+*.safetensors
+*.pth
+*.pt
+
+# 忽略数据集
+data/
+*.jsonl
+*.json
+*.csv
+*.parquet
+*.txt
+
+# 忽略训练日志和缓存
+wandb/
+cache/
+logs/
+*.log
+
+# 忽略所有临时文件
+.*_temp
+._____temp
+
+# 忽略所有锁文件
+*.lock
+.lock

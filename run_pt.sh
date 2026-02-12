@@ -1,16 +1,16 @@
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 pretraining.py \
-    --model_name_or_path Qwen/Qwen2.5-0.5B \
-    --train_file_dir ./data/pretrain \
-    --validation_file_dir ./data/pretrain \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
+CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node 1 pretraining.py \
+    --model_name_or_path /root/autodl-tmp/medical/MedicalGPT/models/base/Qwen7B \
+    --train_file_dir ./data/medical/pretrain \
+    --validation_file_dir ./data/medical/pretrain \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
     --do_train \
     --do_eval \
     --use_peft True \
     --seed 42 \
     --max_train_samples 10000 \
     --max_eval_samples 10 \
-    --num_train_epochs 0.5 \
+    --num_train_epochs 1 \
     --learning_rate 2e-4 \
     --warmup_ratio 0.05 \
     --weight_decay 0.01 \
@@ -25,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 pretraining.py \
     --preprocessing_num_workers 10 \
     --block_size 512 \
     --packing True \
-    --output_dir outputs-pt-qwen-v1 \
+    --output_dir /root/autodl-tmp/medical/MedicalGPT/models/pt/outputs-pt-qwen-7b-v1 \
     --overwrite_output_dir \
     --ddp_timeout 30000 \
     --logging_first_step True \
@@ -34,9 +34,10 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 pretraining.py \
     --lora_alpha 16 \
     --lora_dropout 0.05 \
     --torch_dtype bfloat16 \
-    --bf16 \
+    --bf16 True \
     --device_map auto \
-    --report_to tensorboard \
+    --report_to wandb \
+    --run_name qwen-7b-pt-v1 \
     --ddp_find_unused_parameters False \
     --gradient_checkpointing True \
     --cache_dir ./cache

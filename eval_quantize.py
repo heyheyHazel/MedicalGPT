@@ -10,8 +10,8 @@ import json
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import argparse
-from loguru import logger
 import os
+from loguru import logger
 
 parser = argparse.ArgumentParser(description="========量化困惑度测试========")
 parser.add_argument(
