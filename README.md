@@ -65,6 +65,66 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 </details>
 
 
+
+## 😆 Logs
+[2026/02/12] v1.0 MedicalGPT复现记录
+### 1. 增量预训练 (PT)
+- 下载 base model，确保下载了完整的权重而不是 Git LFS指针文件（指向huggingface 几行文字）
+  ```python
+  # download Qwen2.5-7B model from modelscope
+  pip install modelscope
+  mkdir -p models/base
+  python -c "from modelscope import snapshot_download; snapshot_download('qwen/Qwen2.5-7B-Instruct', cache_dir='./models/base')"
+  # 查看文件大小
+  ls -lh qwen/Qwen2.5-7B-Instruct/model.safetensors
+  ```
+- 下载 dataset：
+  ```python
+  cd data
+  mkdir -p data/medical
+  export HF_ENDPOINT=https://hf-mirror.com
+  hf download --repo-type dataset shibing624/medical --local-dir ./data/medical
+  ```
+- 模型评测：
+  - 使用[C-Eval](https://github.com/hkust-nlp/ceval)数据集中的医疗相关的验证集（basic_medicine、clinical、physician）作为量化模型性能的标准。C-Eval是全面的中文基础模型评估套件，涵盖了52个学科的13948个多项选择题。
+    ```python
+    export HF_ENDPOINT=https://hf-mirror.com
+    hf download --repo-type dataset ceval/ceval-exam --local-dir ./data/ceval
+    ```
+  - [简易的C-Eval测试脚本](https://github.com/heyheyHazel/MedicalGPT/blob/main/eval_ceval.py)
+  - 评测结果：增量预训练之后准确率有所上升，79.91 -> 82.79
+
+### 2. SFT-Baseline
+- 对齐数据集格式：训练前使用```convert_sharegpt.py```将原始语料转化为ShareGPT格式；
+- 模型推理：base model + sft-baseline的lora权重
+  ```python
+  python inference.py \
+      --base_model /root/autodl-tmp/medical/MedicalGPT/models/base/Qwen-7B \
+      --lora_model outputs-sft-qwen-v1 \
+      --interactive
+  ```
+- 训练结果：成功习得 Chat 模板格式，能够准确遵循人类指令。在保持医疗专业性的同时，有效解决了重复生成问题，具备了初步的问诊交互能力。
+- 模型合并：使用```merge_peft_adapter.py```把LoRA权重缝合进base model生成huggingface格式的模型。
+  ```python
+  python merge_peft_adapter.py \
+    --base_model models/base/medical-qwen-7b-pt \
+    --lora_model outputs-sft-qwen-v2 \
+    --output_dir models/base/medical-qwen-7b-sft
+  ```
+- 评测结果：经过Baseline SFT，模型在CEval的分数反而下降了 -> “对齐税”、“知识坍塌”现象。
+
+### 3. SFT-KnowledgeMatch
+- 下载向量模型：
+  ```python
+  python -c "from modelscope import snapshot_download; model_dir = snapshot_download('shibing624/text2vec-base-chinese', cache_dir='./models')"
+  ```
+- [KnowledgeMatch-v2](https://github.com/heyheyHazel/MedicalGPT/blob/main/km_v2.py)：题目找语料 ❌
+- [KnowledgeMatch-v3](https://github.com/heyheyHazel/MedicalGPT/blob/main/knowledge_match.py)：语料找题目 ✅
+- 评测结果：经过KM-v3，分数上升（82.79 -> 84.98），保存增强SFT得到的模型```medical-qwen-7b-sft-km-v3```。
+
+
+
+
 ## 😊 Features
 
 
