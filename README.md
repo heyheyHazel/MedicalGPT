@@ -159,6 +159,8 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 
     # 格式整理 剔除metadata
     python ppo_data.py
+    # 转换为ppo数据格式
+    python convert_ppo.py
     ```
 - 构造通用偏好推理数据：
   - 使用HuggingFace的推理数据集```Chinese-DeepSeek-R1-Distill-data-110k```作为chosen；rejected由之前训练出来的sft-km-v3回答；最终得到通用偏好推理数据800条。
@@ -171,6 +173,10 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
     tmux new -s general_neg
     python general_neg.py
     ```
+- 🤗 下载构造好的数据（raw data，训练前使用对应的脚本转换为模型适配的格式）
+  ```python
+  hf download lotuswayne/MedicalGPT --repo-type dataset --local-dir ./data/grpo
+  ```
 - 训练奖励模型
   ```python
   sh run_rm.sh
