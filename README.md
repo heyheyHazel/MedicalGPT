@@ -122,8 +122,76 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 - [KnowledgeMatch-v3](https://github.com/heyheyHazel/MedicalGPT/blob/main/knowledge_match.py)：语料找题目 ✅
 - 评测结果：经过KM-v3，分数上升（82.79 -> 84.98），保存增强SFT得到的模型```medical-qwen-7b-sft-km-v3```。
 
+### 4. DPO
+- 底座模型：使用增强SFT之后的```medical-qwen-7b-sft-km-v3```。
+- 数据工程：
+  - V1：使用```shibing/medical/reward```的3800条医疗偏好数据对 + ```medical```项目自带的500条通用领域偏好数据对。使用[dpo_data.py](https://github.com/heyheyHazel/MedicalGPT/blob/main/dpo_data.py)将数据集列名统一成system + history + prompt + chosen + rejected格式；
+    - 训练指标虽然很好，但是推理时出现性能退化的现象。通过抽样发现原始数据存在标签噪音，非专业、甚至有格式错误的回答（如标点乱用、逻辑矛盾）被误标为 chosen，所以考虑清洗或重构数据。
+  - V2：基于RLAIF的逻辑蒸馏，重新构建了偏好对齐流水线：
+    - Prompt 重构：利用大模型将口语化的原始提问重构为标准的“主诉-现病史-核心问题”病历格式；
+    - 非对称偏好构造：利用 DeepSeek-R1 构造正负样本
+      - Chosen（正样本）：输出具备深度病理分析的专家级建议。
+      - Rejected（负样本）：输出逻辑性、专业性一般的平庸的回答。
+    - 混合采样：为防止模型在医疗领域过拟合，按 4:1 的比例混入通用领域的偏好数据对，确保模型在具备专业深度的同时保持通用对话的泛化性。
+- 运行DPO：
+  ```python
+  sh run_dpo.py
+  ```
 
+### 5. PPO
+- PPO（Proximal Policy Optimization，近端策略优化）的核心目的在于通过动态的“探索-反馈”机制，在奖励模型的实时监督下，微调模型使其产生高分行为。通过 KL 散度约束确保模型在对齐偏好的同时，不偏离预训练的语言分布。PPO涉及四个模型：
+  - Actor (Policy Model)：正在进化的 7B 医疗模型。
+  - Reference：SFT 后的基准参考模型，权重冻结（通过 ref_model=None 技巧共享底座）。
+  - Reward：预先训练好的 7B 医学判官模型，给生成的回答打分。
+  - Critic (Value Model)：负责预估状态价值的教练模型（可以与 Reward 共享底座）。
+- 构造医疗偏好推理数据：
+  - 使用```shibing/medical/reward```数据，虽然是偏好数据的格式，但是：1）存在标签倒置的情况，数据集质量不高；2）没有推理的过程。所以考虑使用DeepSeek-R1对其进行重构 -> [generate_rldata.py](https://github.com/heyheyHazel/MedicalGPT/blob/main/generate_rldata.py)。
+    ```python
+    export OPENAI_API_KEY = 'sk-xxx' # 设置api环境变量
+    python generate_rldata.py
+    # 运行时间较长 使用tmux挂在后台
+    apt-get install tmux -y
+    tmux new -s rlhf_data
+    python generate_rldata.py
+    # 返回主终端：Ctrl + B，再按一下 D （detach）关机的时候记得detach
+    # 查看进度
+    tmux attach -t rlhf_data
 
+    # 格式整理 剔除metadata
+    python ppo_data.py
+    ```
+- 构造通用偏好推理数据：
+  - 使用HuggingFace的推理数据集```Chinese-DeepSeek-R1-Distill-data-110k```作为chosen；rejected由之前训练出来的sft-km-v3回答；最终得到通用偏好推理数据800条。
+    ```python
+    # 下载数据集
+    mkdir -p data/general
+    export HF_ENDPOINT=https://hf-mirror.com
+    hf download --repo-type dataset Congliu/Chinese-DeepSeek-R1-Distill-data-110k --local-dir ./data/general
+    # 生成rejected回答
+    tmux new -s general_neg
+    python general_neg.py
+    ```
+- 训练奖励模型
+  ```python
+  sh run_rm.sh
+  python merge_peft_adapter.py \
+      --base_model ./models/base/medical-qwen-7b-sft-km-v3 \
+      --lora_model ./models/rlhf/outputs-rm-qwen-7b-v1 \
+      --output_dir ./models/rm/medical-qwen-7b-rm-merged
+  ```
+- 训练PPO：修改脚本以适配[ppo_requirements.txt](https://github.com/heyheyHazel/MedicalGPT/blob/main/ppo_requirements.txt)版本。
+  - [单卡训练](https://github.com/heyheyHazel/MedicalGPT/blob/main/ppo_training.py)；[多卡训练](https://github.com/heyheyHazel/MedicalGPT/blob/main/ppo_ddp.py)
+  ```python
+  sh run_ppo.py
+  ```
+
+### 6. GRPO
+- 确保环境升级：[grpo_requirements.txt](https://github.com/heyheyHazel/MedicalGPT/blob/main/grpo_requirements.txt)
+- 修改奖励函数：包括格式规范奖励、语义相似度匹配、大模型打分奖励、困惑度惩罚 -> [grpo_training.py](https://github.com/heyheyHazel/MedicalGPT/blob/main/grpo_training.py)
+- 训练GRPO：模型具备输出显式CoT的能力
+  ```python
+  sh run_grpo.py
+  ```
 
 ## 😊 Features
 
