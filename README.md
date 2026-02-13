@@ -121,6 +121,10 @@ Supervised Finetuning, RLHF(Reward Modeling and Reinforcement Learning) and DPO(
 - [KnowledgeMatch-v2](https://github.com/heyheyHazel/MedicalGPT/blob/main/km_v2.py)：题目找语料 ❌
 - [KnowledgeMatch-v3](https://github.com/heyheyHazel/MedicalGPT/blob/main/knowledge_match.py)：语料找题目 ✅
 - 评测结果：经过KM-v3，分数上升（82.79 -> 84.98），保存增强SFT得到的模型```medical-qwen-7b-sft-km-v3```。
+  ```python
+  # 下载增强SFT之后的LoRA权重
+  hf download lotuswayne/MedicalGPT-Qwen7B-LoRA --local-dir ./sft
+  ```
 
 ### 4. DPO
 - 底座模型：使用增强SFT之后的```medical-qwen-7b-sft-km-v3```。
